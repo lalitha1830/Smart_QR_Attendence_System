@@ -43,6 +43,9 @@ export default function StudentScan() {
   const lastScannedToken = useRef<string | null>(null);
   const lastScanTime = useRef<number>(0);
 
+  // Keep latest handleScan in a ref so the rAF loop always calls the fresh closure
+  const handleScanRef = useRef<(rawToken: string) => void>(() => {});
+
   /* ---------- Camera management ---------- */
 
   const stopCamera = useCallback(() => {
@@ -94,6 +97,8 @@ export default function StudentScan() {
 
   /* ---------- QR decoding from camera frames ---------- */
 
+  // The rAF loop reads handleScanRef so it always calls the latest handleScan
+  // (which has access to the current profile). This avoids stale closure bugs.
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -115,11 +120,10 @@ export default function StudentScan() {
           ctx.drawImage(video, 0, 0, width, height);
           const imageData = ctx.getImageData(0, 0, width, height);
           const code = jsQR(imageData.data, imageData.width, imageData.height, {
-            inversionAttempts: 'dontInvert',
+            inversionAttempts: 'attemptBoth',
           });
 
           if (code && code.data) {
-            // Debounce: don't process the same token within 3 seconds
             const now = Date.now();
             if (
               code.data !== lastScannedToken.current ||
@@ -127,8 +131,8 @@ export default function StudentScan() {
             ) {
               lastScannedToken.current = code.data;
               lastScanTime.current = now;
-              handleScan(code.data);
-              return; // stop the loop, handleScan takes over
+              handleScanRef.current(code.data);
+              return;
             }
           }
         }
@@ -174,32 +178,45 @@ export default function StudentScan() {
       await new Promise((r) => setTimeout(r, 600));
 
       try {
-        // 1. Decode the token
+        // 1. Try decoding as a QR token first
         const decoded = decodeQrToken(token);
-        if (!decoded || !decoded.sid) {
-          throw new Error('Invalid QR code. The token could not be read.');
+        let session: (AttendanceSession & { subject: Subject; faculty: Profile }) | null = null;
+
+        if (decoded && decoded.sid) {
+          // It's a full QR token — look up by session ID
+          const { data, error } = await supabase
+            .from('attendance_sessions')
+            .select('*, subject:subjects(*), faculty:profiles(*)')
+            .eq('id', decoded.sid)
+            .maybeSingle();
+          if (error) throw new Error('Failed to verify attendance session.');
+          session = data as (AttendanceSession & { subject: Subject; faculty: Profile }) | null;
+        } else {
+          // Not a QR token — try matching by manual_code (case-insensitive)
+          const { data, error } = await supabase
+            .from('attendance_sessions')
+            .select('*, subject:subjects(*), faculty:profiles(*)')
+            .eq('manual_code', token.toUpperCase())
+            .eq('status', 'active')
+            .maybeSingle();
+          if (error) throw new Error('Failed to verify attendance session.');
+          session = data as (AttendanceSession & { subject: Subject; faculty: Profile }) | null;
         }
 
-        // 2. Validate session exists and is active
-        const { data: session, error: sessErr } = await supabase
-          .from('attendance_sessions')
-          .select('*, subject:subjects(*), faculty:profiles(*)')
-          .eq('id', decoded.sid)
-          .maybeSingle();
+        if (!session) {
+          throw new Error('No active session found for this code. Check with your faculty.');
+        }
+        if (session.status !== 'active') {
+          throw new Error('This attendance session is no longer active.');
+        }
 
-        if (sessErr) throw new Error('Failed to verify attendance session.');
-        if (!session) throw new Error('Attendance session not found. The QR code may be invalid.');
-        if (session.status !== 'active') throw new Error('This attendance session is no longer active.');
-
-        const typedSession = session as AttendanceSession & { subject: Subject; faculty: Profile };
-
-        // 3. Check if QR hasn't expired
+        // 2. Check if QR hasn't expired
         const expiresAt = new Date(session.qr_expires_at).getTime();
         if (Date.now() > expiresAt) {
           throw new Error('This QR code has expired. Ask your faculty to generate a new one.');
         }
 
-        // 4. Check if student already scanned
+        // 3. Check if student already scanned
         const { data: existing } = await supabase
           .from('attendance_records')
           .select('id')
@@ -211,7 +228,7 @@ export default function StudentScan() {
           throw new Error('You have already marked attendance for this session.');
         }
 
-        // 5. Insert attendance record
+        // 4. Insert attendance record
         const fingerprint = generateDeviceFingerprint();
         const ip = getClientIP();
 
@@ -237,8 +254,8 @@ export default function StudentScan() {
         // Success!
         setResult({
           success: true,
-          subject: typedSession.subject?.name ?? 'Unknown',
-          faculty: typedSession.faculty?.full_name ?? 'Unknown',
+          subject: session.subject?.name ?? 'Unknown',
+          faculty: session.faculty?.full_name ?? 'Unknown',
           timestamp: new Date().toISOString(),
         });
         setPhase('success');
@@ -256,6 +273,11 @@ export default function StudentScan() {
     },
     [profile, toast, stopCamera],
   );
+
+  // Keep the ref in sync so the rAF loop always calls the latest handleScan
+  useEffect(() => {
+    handleScanRef.current = handleScan;
+  }, [handleScan]);
 
   const reset = useCallback(() => {
     setPhase('idle');
@@ -368,10 +390,10 @@ export default function StudentScan() {
           {/* Manual token input */}
           <div className="card p-6">
             <h3 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2 mb-4">
-              <ScanLine className="h-5 w-5 text-accent-500" /> Enter QR Token
+              <ScanLine className="h-5 w-5 text-accent-500" /> Enter Attendance Code
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-              Paste the QR token shared by your faculty to mark your attendance instantly.
+              Paste the QR token or type the short manual code shared by your faculty.
             </p>
             <form
               onSubmit={(e) => {
@@ -380,13 +402,13 @@ export default function StudentScan() {
               }}
               className="space-y-3"
             >
-              <textarea
+              <input
+                type="text"
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value)}
-                placeholder="Paste QR token here…"
-                rows={3}
+                placeholder="e.g. ABX247 or paste QR token…"
                 disabled={submitting}
-                className="input-field font-mono text-xs resize-none"
+                className="input-field font-mono text-sm uppercase tracking-widest"
               />
               <Button
                 type="submit"

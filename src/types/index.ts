@@ -112,6 +112,7 @@ export interface AttendanceSession {
   schedule_id: string | null;
   session_date: string;
   qr_token: string;
+  manual_code: string | null;
   qr_expires_at: string;
   status: SessionStatus;
   duration_seconds: number;

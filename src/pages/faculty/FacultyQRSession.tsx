@@ -13,7 +13,7 @@ import {
   Button, LoadingSpinner, EmptyState, Avatar, StatusBadge, StatCard,
 } from '../../components/ui';
 import { supabase } from '../../lib/supabase';
-import { generateQrToken } from '../../lib/qr';
+import { generateQrToken, generateManualCode } from '../../lib/qr';
 import { formatDate } from '../../lib/utils';
 import type {
   FacultyAssignment, Subject, Semester, AttendanceSession, AttendanceRecord,
@@ -51,6 +51,7 @@ export default function FacultyQRSession() {
   // Setup state
   const [selectedAssignmentId, setSelectedAssignmentId] = useState<string>('');
   const [duration, setDuration] = useState<number>(120);
+  const [manualCode, setManualCode] = useState<string>('');
 
   // Active session state
   const [session, setSession] = useState<(AttendanceSession & { subject: Subject }) | null>(null);
@@ -148,6 +149,7 @@ export default function FacultyQRSession() {
     const sessionId = crypto.randomUUID();
     const token = generateQrToken(sessionId, selectedAssignment.subject_id, facultyId);
     const expiresAt = new Date(Date.now() + duration * 1000).toISOString();
+    const code = manualCode.trim().toUpperCase() || generateManualCode();
 
     const payload = {
       id: sessionId,
@@ -157,6 +159,7 @@ export default function FacultyQRSession() {
       schedule_id: null,
       session_date: new Date().toISOString().split('T')[0],
       qr_token: token,
+      manual_code: code,
       qr_expires_at: expiresAt,
       status: 'active' as const,
       duration_seconds: duration,
@@ -190,9 +193,10 @@ export default function FacultyQRSession() {
     setActionLoading(true);
     const newToken = generateQrToken(session.id, session.subject_id, facultyId);
     const newExpiry = new Date(Date.now() + duration * 1000).toISOString();
+    const newCode = manualCode.trim().toUpperCase() || generateManualCode();
     const { data, error } = await supabase
       .from('attendance_sessions')
-      .update({ qr_token: newToken, qr_expires_at: newExpiry, status: 'active' })
+      .update({ qr_token: newToken, manual_code: newCode, qr_expires_at: newExpiry, status: 'active' })
       .eq('id', session.id)
       .select('*, subject:subjects(*)')
       .maybeSingle();
@@ -356,6 +360,34 @@ export default function FacultyQRSession() {
               </div>
             </div>
 
+            {/* Custom manual code */}
+            <div>
+              <label className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2 block">
+                Manual Attendance Code <span className="text-xs font-normal text-slate-400">(optional)</span>
+              </label>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                Students who can't scan can type this short code instead. Leave blank to auto-generate.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={manualCode}
+                  onChange={(e) => setManualCode(e.target.value.toUpperCase().slice(0, 10))}
+                  placeholder="Auto-generate"
+                  maxLength={10}
+                  className="input-field font-mono text-sm uppercase tracking-widest"
+                />
+                <button
+                  type="button"
+                  onClick={() => setManualCode(generateManualCode())}
+                  className="btn-secondary px-3 flex-shrink-0"
+                  title="Generate random code"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
             <Button onClick={startSession} loading={creating} disabled={!selectedAssignmentId} className="w-full">
               <Play className="h-5 w-5" />
               Start QR Session
@@ -465,41 +497,60 @@ export default function FacultyQRSession() {
                 </div>
               )}
 
-              {/* Manual token for students whose scanner fails */}
+              {/* Manual code for students whose scanner fails */}
               {!isEnded && (
-                <div className="mt-5 w-full rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-700/30">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                      <KeyRound className="h-3.5 w-3.5" /> Manual Token (for scanner issues)
-                    </div>
-                    <button
-                      onClick={() => setShowToken((v) => !v)}
-                      className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex items-center gap-1"
-                    >
-                      {showToken ? <><EyeOff className="h-3.5 w-3.5" /> Hide</> : <><Eye className="h-3.5 w-3.5" /> Show</>}
-                    </button>
+                <div className="mt-5 w-full rounded-xl border-2 border-dashed border-brand-300 bg-brand-50/50 p-4 dark:border-brand-600/40 dark:bg-brand-600/10">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-brand-700 dark:text-brand-300 mb-3">
+                    <KeyRound className="h-3.5 w-3.5" /> Manual Attendance Code
                   </div>
                   <div className="flex items-center gap-2">
-                    <input
-                      readOnly
-                      value={showToken ? session.qr_token : '••••••••••••••••••••••••'}
-                      onClick={(e) => e.currentTarget.select()}
-                      className="input-field font-mono text-xs py-2 cursor-pointer"
-                    />
+                    <div className="flex-1 text-center">
+                      <p className="text-2xl font-bold font-mono tracking-[0.3em] text-slate-900 dark:text-white">
+                        {session.manual_code || '—'}
+                      </p>
+                    </div>
                     <button
                       onClick={() => {
-                        navigator.clipboard.writeText(session.qr_token);
-                        toast('Token copied to clipboard', 'success');
+                        navigator.clipboard.writeText(session.manual_code || '');
+                        toast('Code copied to clipboard', 'success');
                       }}
                       className="btn-secondary px-3 py-2 flex-shrink-0"
-                      title="Copy token"
+                      title="Copy code"
                     >
                       <Copy className="h-4 w-4" />
                     </button>
                   </div>
-                  <p className="mt-2 text-[11px] text-slate-400">
-                    Share this token with students whose camera scanner isn't working. They can paste it on the Scan page.
+                  <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 text-center">
+                    Share this code with students whose camera isn't working. They can type it on the Scan page.
                   </p>
+                  {/* Full QR token (collapsible) */}
+                  <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700">
+                    <button
+                      onClick={() => setShowToken((v) => !v)}
+                      className="text-[11px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex items-center gap-1 mx-auto"
+                    >
+                      {showToken ? <><EyeOff className="h-3 w-3" /> Hide full QR token</> : <><Eye className="h-3 w-3" /> Show full QR token</>}
+                    </button>
+                    {showToken && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          readOnly
+                          value={session.qr_token}
+                          onClick={(e) => e.currentTarget.select()}
+                          className="input-field font-mono text-[10px] py-1.5 cursor-pointer"
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(session.qr_token);
+                            toast('Token copied', 'success');
+                          }}
+                          className="btn-secondary px-2 py-1.5 flex-shrink-0"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

@@ -11,10 +11,21 @@ export function generateQrToken(sessionId: string, subjectId: string, facultyId:
 
 export function decodeQrToken(token: string): { sid: string; sub: string; fac: string; ts: number; nonce: string } | null {
   try {
-    return JSON.parse(atob(token));
+    const parsed = JSON.parse(atob(token));
+    if (!parsed || typeof parsed.sid !== 'string') return null;
+    return parsed;
   } catch {
     return null;
   }
+}
+
+export function generateManualCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
 }
 
 export function generateDeviceFingerprint(): string {
