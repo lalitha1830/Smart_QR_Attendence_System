@@ -4,7 +4,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import {
   QrCode, Clock, Users, CheckCircle2, XCircle, Timer, RefreshCw,
   StopCircle, Play, BookOpen, Sparkles, ShieldCheck, Wifi,
-  ArrowLeft, Activity,
+  ArrowLeft, Activity, Copy, Eye, EyeOff, KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -58,6 +58,7 @@ export default function FacultyQRSession() {
   const [roster, setRoster] = useState<EnrolledStudent[]>([]);
   const [creating, setCreating] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [showToken, setShowToken] = useState(false);
 
   // Live timer
   const [secondsLeft, setSecondsLeft] = useState(0);
@@ -461,6 +462,44 @@ export default function FacultyQRSession() {
                       style={{ width: `${isExpired ? 0 : timePct}%` }}
                     />
                   </div>
+                </div>
+              )}
+
+              {/* Manual token for students whose scanner fails */}
+              {!isEnded && (
+                <div className="mt-5 w-full rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-700/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      <KeyRound className="h-3.5 w-3.5" /> Manual Token (for scanner issues)
+                    </div>
+                    <button
+                      onClick={() => setShowToken((v) => !v)}
+                      className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 flex items-center gap-1"
+                    >
+                      {showToken ? <><EyeOff className="h-3.5 w-3.5" /> Hide</> : <><Eye className="h-3.5 w-3.5" /> Show</>}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      readOnly
+                      value={showToken ? session.qr_token : '••••••••••••••••••••••••'}
+                      onClick={(e) => e.currentTarget.select()}
+                      className="input-field font-mono text-xs py-2 cursor-pointer"
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(session.qr_token);
+                        toast('Token copied to clipboard', 'success');
+                      }}
+                      className="btn-secondary px-3 py-2 flex-shrink-0"
+                      title="Copy token"
+                    >
+                      <Copy className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-400">
+                    Share this token with students whose camera scanner isn't working. They can paste it on the Scan page.
+                  </p>
                 </div>
               )}
 
