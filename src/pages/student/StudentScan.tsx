@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import jsQR from 'jsqr';
 import {
   ScanLine, Camera, CameraOff, CheckCircle2, XCircle, Clock, BookOpen,
-  User, AlertTriangle, RefreshCw, QrCode, Zap, ArrowRight, Info,
+  User, AlertTriangle, RefreshCw, QrCode, Zap, ArrowRight, Info, Loader2,
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { decodeQrToken, generateDeviceFingerprint, getClientIP } from '../../lib/qr';
@@ -18,7 +19,6 @@ interface ScanResult {
   subject?: string;
   faculty?: string;
   timestamp?: string;
-  classroom?: string | null;
   error?: string;
 }
 
@@ -33,15 +33,37 @@ export default function StudentScan() {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
+  const [cameraStarting, setCameraStarting] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scanLoopRef = useRef<number | null>(null);
+  const lastScannedToken = useRef<string | null>(null);
+  const lastScanTime = useRef<number>(0);
 
   /* ---------- Camera management ---------- */
 
+  const stopCamera = useCallback(() => {
+    if (scanLoopRef.current !== null) {
+      cancelAnimationFrame(scanLoopRef.current);
+      scanLoopRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraActive(false);
+  }, []);
+
   const startCamera = useCallback(async () => {
     setCameraError(null);
+    setCameraStarting(true);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'environment' },
@@ -53,27 +75,86 @@ export default function StudentScan() {
         await videoRef.current.play();
       }
       setCameraActive(true);
-    } catch {
-      setCameraError('Camera not available. You can still paste a QR token manually below.');
+      setCameraStarting(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      let friendly = 'Camera not available. You can still paste a QR token manually below.';
+      if (msg.includes('Permission') || msg.includes('NotAllowed')) {
+        friendly = 'Camera permission denied. Please allow camera access in your browser settings, or paste the QR token manually below.';
+      } else if (msg.includes('NotFound') || msg.includes('DevicesNotFound')) {
+        friendly = 'No camera found on this device. You can paste the QR token manually below.';
+      } else if (msg.includes('NotReadable')) {
+        friendly = 'Camera is in use by another application. Close it and try again, or paste the token manually.';
+      }
+      setCameraError(friendly);
       setCameraActive(false);
+      setCameraStarting(false);
     }
   }, []);
 
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
+  /* ---------- QR decoding from camera frames ---------- */
+
+  const processFrame = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    if (!video || !canvas || !streamRef.current) {
+      scanLoopRef.current = requestAnimationFrame(processFrame);
+      return;
     }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
+
+    if (video.readyState >= 2) {
+      const width = video.videoWidth;
+      const height = video.videoHeight;
+
+      if (width > 0 && height > 0) {
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, width, height);
+          const imageData = ctx.getImageData(0, 0, width, height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'dontInvert',
+          });
+
+          if (code && code.data) {
+            // Debounce: don't process the same token within 3 seconds
+            const now = Date.now();
+            if (
+              code.data !== lastScannedToken.current ||
+              now - lastScanTime.current > 3000
+            ) {
+              lastScannedToken.current = code.data;
+              lastScanTime.current = now;
+              handleScan(code.data);
+              return; // stop the loop, handleScan takes over
+            }
+          }
+        }
+      }
     }
-    setCameraActive(false);
+
+    scanLoopRef.current = requestAnimationFrame(processFrame);
   }, []);
 
+  // Start the scan loop when camera becomes active
+  useEffect(() => {
+    if (cameraActive) {
+      scanLoopRef.current = requestAnimationFrame(processFrame);
+    }
+    return () => {
+      if (scanLoopRef.current !== null) {
+        cancelAnimationFrame(scanLoopRef.current);
+        scanLoopRef.current = null;
+      }
+    };
+  }, [cameraActive, processFrame]);
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => stopCamera();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [stopCamera]);
 
   /* ---------- QR submission ---------- */
 
@@ -90,8 +171,7 @@ export default function StudentScan() {
       setPhase('scanning');
       setResult(null);
 
-      // Brief scanning animation for UX
-      await new Promise((r) => setTimeout(r, 900));
+      await new Promise((r) => setTimeout(r, 600));
 
       try {
         // 1. Decode the token
@@ -160,11 +240,11 @@ export default function StudentScan() {
           subject: typedSession.subject?.name ?? 'Unknown',
           faculty: typedSession.faculty?.full_name ?? 'Unknown',
           timestamp: new Date().toISOString(),
-          classroom: session.classroom_id,
         });
         setPhase('success');
-        toast('Attendance marked successfully! 🎉', 'success');
+        toast('Attendance marked successfully!', 'success');
         setTokenInput('');
+        stopCamera();
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Something went wrong while marking attendance.';
         setResult({ success: false, error: message });
@@ -174,13 +254,14 @@ export default function StudentScan() {
         setSubmitting(false);
       }
     },
-    [profile, toast],
+    [profile, toast, stopCamera],
   );
 
   const reset = useCallback(() => {
     setPhase('idle');
     setResult(null);
     setTokenInput('');
+    lastScannedToken.current = null;
   }, []);
 
   return (
@@ -202,13 +283,16 @@ export default function StudentScan() {
             </h3>
             <button
               onClick={cameraActive ? stopCamera : startCamera}
-              className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+              disabled={cameraStarting}
+              className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 ${
                 cameraActive
                   ? 'bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-900/20 dark:text-red-400'
                   : 'bg-brand-50 text-brand-600 hover:bg-brand-100 dark:bg-brand-600/15 dark:text-brand-400'
               }`}
             >
-              {cameraActive ? (
+              {cameraStarting ? (
+                <span className="flex items-center gap-1"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Starting…</span>
+              ) : cameraActive ? (
                 <span className="flex items-center gap-1"><CameraOff className="h-3.5 w-3.5" /> Stop</span>
               ) : (
                 <span className="flex items-center gap-1"><Camera className="h-3.5 w-3.5" /> Start Camera</span>
@@ -226,6 +310,7 @@ export default function StudentScan() {
                   playsInline
                   muted
                 />
+                <canvas ref={canvasRef} className="hidden" />
                 {/* Scan overlay frame */}
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                   <div className="relative w-3/4 h-3/4">
@@ -273,7 +358,7 @@ export default function StudentScan() {
           {cameraActive && (
             <p className="mt-3 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
               <Info className="h-3.5 w-3.5 flex-shrink-0" />
-              Camera decoding requires a QR token. If auto-detect isn't available, paste the token below.
+              The camera automatically detects QR codes. Keep the code within the frame.
             </p>
           )}
         </div>
@@ -357,13 +442,7 @@ export default function StudentScan() {
                     transition={{ type: 'spring', stiffness: 260, damping: 20, delay: 0.1 }}
                     className="flex h-20 w-20 items-center justify-center rounded-full bg-accent-50 dark:bg-accent-600/15 mb-4"
                   >
-                    <motion.div
-                      initial={{ pathLength: 0 }}
-                      animate={{ pathLength: 1 }}
-                      transition={{ duration: 0.5, delay: 0.3 }}
-                    >
-                      <CheckCircle2 className="h-12 w-12 text-accent-500" />
-                    </motion.div>
+                    <CheckCircle2 className="h-12 w-12 text-accent-500" />
                   </motion.div>
                   <h3 className="text-lg font-bold text-slate-900 dark:text-white">Attendance Marked!</h3>
                   <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
